@@ -27,6 +27,10 @@ use std::str::FromStr;
 /// overhead of dynamically doing lower case conversion during the hash code
 /// computation and the comparison operation.
 ///
+/// **Note:** In this fork, custom header names preserve their original case.
+/// Standard headers (like `Content-Type`) are still normalized to lowercase.
+/// Comparisons and hashing remain case-insensitive.
+///
 /// [`HeaderMap`]: struct.HeaderMap.html
 /// [`header`]: index.html
 #[derive(Clone, Eq, PartialEq, Hash)]
@@ -35,9 +39,9 @@ pub struct HeaderName {
 }
 
 // Almost a full `HeaderName`
-#[derive(Debug, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct HdrName<'a> {
-    inner: Repr<MaybeLower<'a>>,
+    inner: Repr<MaybeValidated<'a>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -47,14 +51,14 @@ enum Repr<T> {
 }
 
 // Used to hijack the Hash impl
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct Custom(ByteStr);
 
 #[derive(Debug, Clone)]
-// Invariant: If lower then buf is valid UTF-8.
-struct MaybeLower<'a> {
+// Invariant: If validated then buf is valid UTF-8.
+struct MaybeValidated<'a> {
     buf: &'a [u8],
-    lower: bool,
+    validated: bool,
 }
 
 /// A possible error when converting a `HeaderName` from another type.
@@ -102,6 +106,29 @@ macro_rules! standard_headers {
                     _ => None,
                 }
             }
+
+            /// Like from_bytes but takes a fixed-size buffer and length for const context usage
+            const fn from_bytes_const(buf: &[u8; SCRATCH_BUF_SIZE], len: usize) -> Option<StandardHeader> {
+                // We need to compare byte-by-byte since we can't create slices in const
+                $(
+                    if len == $name_bytes.len() {
+                        let expected: &[u8] = $name_bytes;
+                        let mut matches = true;
+                        let mut i = 0;
+                        while i < len {
+                            if buf[i] != expected[i] {
+                                matches = false;
+                                break;
+                            }
+                            i += 1;
+                        }
+                        if matches {
+                            return Some(StandardHeader::$konst);
+                        }
+                    }
+                )+
+                None
+            }
         }
 
         #[cfg(test)]
@@ -134,10 +161,11 @@ macro_rules! standard_headers {
                 assert_eq!(bytes, name);
                 assert_eq!(HeaderName::from_bytes(name_bytes).unwrap(), std);
 
-                // Test upper case
+                // Test upper case - still recognized as standard, serializes as lowercase
                 let upper = name.to_uppercase();
                 let bytes: Bytes =
                     HeaderName::from_bytes(upper.as_bytes()).unwrap().inner.into();
+                // Standard headers always serialize as lowercase
                 assert_eq!(bytes, name_bytes);
                 assert_eq!(HeaderName::from_bytes(upper.as_bytes()).unwrap(),
                            std);
@@ -1005,8 +1033,43 @@ standard_headers! {
 /// ```
 // HEADER_CHARS maps every byte that is 128 or larger to 0 so everything that is
 // mapped by HEADER_CHARS, maps to a valid single-byte UTF-8 codepoint.
+//
+// This table preserves case (A -> A, a -> a).
 #[rustfmt::skip]
 const HEADER_CHARS: [u8; 256] = [
+    //  0      1      2      3      4      5      6      7      8      9
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //   x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  1x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  2x
+        0,     0,     0,  b'!',     0,  b'#',  b'$',  b'%',  b'&', b'\'', //  3x
+        0,     0,  b'*',  b'+',     0,  b'-',  b'.',     0,  b'0',  b'1', //  4x
+     b'2',  b'3',  b'4',  b'5',  b'6',  b'7',  b'8',  b'9',     0,     0, //  5x
+        0,     0,     0,     0,     0,  b'A',  b'B',  b'C',  b'D',  b'E', //  6x
+     b'F',  b'G',  b'H',  b'I',  b'J',  b'K',  b'L',  b'M',  b'N',  b'O', //  7x
+     b'P',  b'Q',  b'R',  b'S',  b'T',  b'U',  b'V',  b'W',  b'X',  b'Y', //  8x
+     b'Z',     0,     0,     0,  b'^',  b'_',  b'`',  b'a',  b'b',  b'c', //  9x
+     b'd',  b'e',  b'f',  b'g',  b'h',  b'i',  b'j',  b'k',  b'l',  b'm', // 10x
+     b'n',  b'o',  b'p',  b'q',  b'r',  b's',  b't',  b'u',  b'v',  b'w', // 11x
+     b'x',  b'y',  b'z',     0,  b'|',     0,  b'~',     0,     0,     0, // 12x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 13x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 14x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 15x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 16x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 17x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 18x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 19x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 20x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 21x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 22x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 23x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 24x
+        0,     0,     0,     0,     0,     0                              // 25x
+];
+
+// HEADER_CHARS_LOWER maps every byte that is 128 or larger to 0.
+// Characters are mapped to their lowercase equivalent.
+#[rustfmt::skip]
+const HEADER_CHARS_LOWER: [u8; 256] = [
     //  0      1      2      3      4      5      6      7      8      9
         0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //   x
         0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  1x
@@ -1039,6 +1102,8 @@ const HEADER_CHARS: [u8; 256] = [
 /// Valid header name characters for HTTP/2.0 and HTTP/3.0
 // HEADER_CHARS_H2 maps every byte that is 128 or larger to 0 so everything that is
 // mapped by HEADER_CHARS_H2, maps to a valid single-byte UTF-8 codepoint.
+//
+// This table rejects uppercase (HTTP/2 requires lowercase headers).
 #[rustfmt::skip]
 const HEADER_CHARS_H2: [u8; 256] = [
     //  0      1      2      3      4      5      6      7      8      9
@@ -1048,9 +1113,9 @@ const HEADER_CHARS_H2: [u8; 256] = [
         0,     0,     0,  b'!',  b'"',  b'#',  b'$',  b'%',  b'&', b'\'', //  3x
         0,     0,  b'*',  b'+',     0,  b'-',  b'.',     0,  b'0',  b'1', //  4x
      b'2',  b'3',  b'4',  b'5',  b'6',  b'7',  b'8',  b'9',     0,     0, //  5x
-        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  6x
-        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  7x
-        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  8x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  6x (A-J -> 0)
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  7x (K-T -> 0)
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  8x (U-Z -> 0)
         0,     0,     0,     0,  b'^',  b'_',  b'`',  b'a',  b'b',  b'c', //  9x
      b'd',  b'e',  b'f',  b'g',  b'h',  b'i',  b'j',  b'k',  b'l',  b'm', // 10x
      b'n',  b'o',  b'p',  b'q',  b'r',  b's',  b't',  b'u',  b'v',  b'w', // 11x
@@ -1079,20 +1144,28 @@ fn parse_hdr<'a>(
         0 => Err(InvalidHeaderName::new()),
         len @ 1..=SCRATCH_BUF_SIZE => {
             // Read from data into the buffer - transforming using `table` as we go
+            // This is for validation (0 = invalid byte)
             data.iter()
                 .zip(b.iter_mut())
                 .for_each(|(index, out)| *out = MaybeUninit::new(table[*index as usize]));
             // Safety: len bytes of b were just initialized.
             let name: &'a [u8] = unsafe { slice_assume_init(&b[0..len]) };
-            match StandardHeader::from_bytes(name) {
+
+            // Check for invalid bytes
+            if name.contains(&0) {
+                return Err(InvalidHeaderName::new());
+            }
+
+            // Create lowercase version for standard header lookup
+            let mut lower_buf = uninit_u8_array();
+            for (i, &byte) in data.iter().enumerate() {
+                lower_buf[i] = MaybeUninit::new(byte.to_ascii_lowercase());
+            }
+            let lower_name: &[u8] = unsafe { slice_assume_init(&lower_buf[0..len]) };
+
+            match StandardHeader::from_bytes(lower_name) {
                 Some(sh) => Ok(sh.into()),
-                None => {
-                    if name.contains(&0) {
-                        Err(InvalidHeaderName::new())
-                    } else {
-                        Ok(HdrName::custom(name, true))
-                    }
-                }
+                None => Ok(HdrName::custom(name, true)),
             }
         }
         SCRATCH_BUF_OVERFLOW..=super::MAX_HEADER_NAME_LEN => Ok(HdrName::custom(data, false)),
@@ -1111,19 +1184,27 @@ impl<'a> From<StandardHeader> for HdrName<'a> {
 impl HeaderName {
     /// Converts a slice of bytes to an HTTP header name.
     ///
-    /// This function normalizes the input.
+    /// This function normalizes standard headers to lowercase, but preserves the case of custom headers.
     pub fn from_bytes(src: &[u8]) -> Result<HeaderName, InvalidHeaderName> {
         let mut buf = uninit_u8_array();
         // Precondition: HEADER_CHARS is a valid table for parse_hdr().
         match parse_hdr(src, &mut buf, &HEADER_CHARS)?.inner {
-            Repr::Standard(std) => Ok(std.into()),
-            Repr::Custom(MaybeLower { buf, lower: true }) => {
+            Repr::Standard(std) => Ok(HeaderName {
+                inner: Repr::Standard(std),
+            }),
+            Repr::Custom(MaybeValidated {
+                buf,
+                validated: true,
+            }) => {
                 let buf = Bytes::copy_from_slice(buf);
-                // Safety: the invariant on MaybeLower ensures buf is valid UTF-8.
+                // Safety: the invariant on MaybeValidated ensures buf is valid UTF-8.
                 let val = unsafe { ByteStr::from_utf8_unchecked(buf) };
                 Ok(Custom(val).into())
             }
-            Repr::Custom(MaybeLower { buf, lower: false }) => {
+            Repr::Custom(MaybeValidated {
+                buf,
+                validated: false,
+            }) => {
                 use bytes::BufMut;
                 let mut dst = BytesMut::with_capacity(buf.len());
 
@@ -1170,14 +1251,22 @@ impl HeaderName {
         let mut buf = uninit_u8_array();
         // Precondition: HEADER_CHARS_H2 is a valid table for parse_hdr()
         match parse_hdr(src, &mut buf, &HEADER_CHARS_H2)?.inner {
-            Repr::Standard(std) => Ok(std.into()),
-            Repr::Custom(MaybeLower { buf, lower: true }) => {
+            Repr::Standard(std) => Ok(HeaderName {
+                inner: Repr::Standard(std),
+            }),
+            Repr::Custom(MaybeValidated {
+                buf,
+                validated: true,
+            }) => {
                 let buf = Bytes::copy_from_slice(buf);
-                // Safety: the invariant on MaybeLower ensures buf is valid UTF-8.
+                // Safety: the invariant on MaybeValidated ensures buf is valid UTF-8.
                 let val = unsafe { ByteStr::from_utf8_unchecked(buf) };
                 Ok(Custom(val).into())
             }
-            Repr::Custom(MaybeLower { buf, lower: false }) => {
+            Repr::Custom(MaybeValidated {
+                buf,
+                validated: false,
+            }) => {
                 for &b in buf.iter() {
                     // HEADER_CHARS_H2 maps all bytes that are not valid single-byte
                     // UTF-8 to 0 so this check returns an error for invalid UTF-8.
@@ -1197,9 +1286,11 @@ impl HeaderName {
 
     /// Converts a static string to a HTTP header name.
     ///
-    /// This function requires the static string to only contain lowercase
-    /// characters, numerals and symbols, as per the HTTP/2.0 specification
-    /// and header names internal representation within this library.
+    /// This function requires the static string to only contain characters,
+    /// numerals and symbols allowed in HTTP headers.
+    ///
+    /// **Note:** Standard headers (like "Content-Type") are normalized to lowercase.
+    /// Custom headers preserve their casing.
     ///
     /// # Panics
     ///
@@ -1226,17 +1317,34 @@ impl HeaderName {
     /// #
     /// // Parsing a header that contains invalid symbols:
     /// HeaderName::from_static("content{}{}length"); // This line panics!
-    ///
-    /// // Parsing a header that contains invalid uppercase characters.
-    /// let a = HeaderName::from_static("foobar");
-    /// let b = HeaderName::from_static("FOOBAR"); // This line panics!
     /// ```
     pub const fn from_static(src: &'static str) -> HeaderName {
         let name_bytes = src.as_bytes();
-        if let Some(standard) = StandardHeader::from_bytes(name_bytes) {
-            return HeaderName {
-                inner: Repr::Standard(standard),
-            };
+
+        // Check if this matches a standard header (case-insensitive)
+        // First, create a lowercase version for matching
+        if name_bytes.len() <= SCRATCH_BUF_SIZE {
+            // Lowercase the bytes in const context
+            let mut lower_buf = [0u8; SCRATCH_BUF_SIZE];
+            let mut i = 0;
+            while i < name_bytes.len() {
+                let b = name_bytes[i];
+                lower_buf[i] = if b >= b'A' && b <= b'Z' {
+                    b + 32 // Convert to lowercase
+                } else {
+                    b
+                };
+                i += 1;
+            }
+
+            // Create a slice of the lowercased bytes
+            // We need to use a trick since we can't slice in const fn easily
+            // Check against standard headers using the lowercased buffer
+            if let Some(standard) = StandardHeader::from_bytes_const(&lower_buf, name_bytes.len()) {
+                return HeaderName {
+                    inner: Repr::Standard(standard),
+                };
+            }
         }
 
         if name_bytes.is_empty() || name_bytes.len() > super::MAX_HEADER_NAME_LEN || {
@@ -1244,7 +1352,7 @@ impl HeaderName {
             loop {
                 if i >= name_bytes.len() {
                     break false;
-                } else if HEADER_CHARS_H2[name_bytes[i] as usize] == 0 {
+                } else if HEADER_CHARS[name_bytes[i] as usize] == 0 {
                     break true;
                 }
                 i += 1;
@@ -1261,7 +1369,8 @@ impl HeaderName {
 
     /// Returns a `str` representation of the header.
     ///
-    /// The returned string will always be lower case.
+    /// The returned string will be lower case for standard headers, but will
+    /// preserve the original case for custom headers.
     #[inline]
     pub fn as_str(&self) -> &str {
         match self.inner {
@@ -1494,11 +1603,11 @@ impl Error for InvalidHeaderName {}
 // ===== HdrName =====
 
 impl<'a> HdrName<'a> {
-    // Precondition: if lower then buf is valid UTF-8
-    fn custom(buf: &'a [u8], lower: bool) -> HdrName<'a> {
+    // Precondition: if validated then buf is valid UTF-8
+    fn custom(buf: &'a [u8], validated: bool) -> HdrName<'a> {
         HdrName {
-            // Invariant (on MaybeLower): follows from the precondition
-            inner: Repr::Custom(MaybeLower { buf, lower }),
+            // Invariant (on MaybeValidated): follows from the precondition
+            inner: Repr::Custom(MaybeValidated { buf, validated }),
         }
     }
 
@@ -1531,10 +1640,10 @@ impl<'a> From<HdrName<'a>> for HeaderName {
             Repr::Standard(s) => HeaderName {
                 inner: Repr::Standard(s),
             },
-            Repr::Custom(maybe_lower) => {
-                if maybe_lower.lower {
-                    let buf = Bytes::copy_from_slice(maybe_lower.buf);
-                    // Safety: the invariant on MaybeLower ensures buf is valid UTF-8.
+            Repr::Custom(maybe_validated) => {
+                if maybe_validated.validated {
+                    let buf = Bytes::copy_from_slice(maybe_validated.buf);
+                    // Safety: the invariant on MaybeValidated ensures buf is valid UTF-8.
                     let byte_str = unsafe { ByteStr::from_utf8_unchecked(buf) };
 
                     HeaderName {
@@ -1542,15 +1651,15 @@ impl<'a> From<HdrName<'a>> for HeaderName {
                     }
                 } else {
                     use bytes::BufMut;
-                    let mut dst = BytesMut::with_capacity(maybe_lower.buf.len());
+                    let mut dst = BytesMut::with_capacity(maybe_validated.buf.len());
 
-                    for b in maybe_lower.buf.iter() {
+                    for b in maybe_validated.buf.iter() {
                         // HEADER_CHARS maps each byte to a valid single-byte UTF-8
                         // codepoint.
                         dst.put_u8(HEADER_CHARS[*b as usize]);
                     }
 
-                    // Safety: the loop above maps each byte of maybe_lower.buf to a
+                    // Safety: the loop above maps each byte of maybe_validated.buf to a
                     // valid single-byte UTF-8 codepoint before copying it into dst.
                     // dst (and hence dst.freeze()) is thus valid UTF-8.
                     let buf = unsafe { ByteStr::from_utf8_unchecked(dst.freeze()) };
@@ -1574,54 +1683,52 @@ impl<'a> PartialEq<HdrName<'a>> for HeaderName {
                 _ => false,
             },
             Repr::Custom(Custom(ref a)) => match other.inner {
-                Repr::Custom(ref b) => {
-                    if b.lower {
-                        a.as_bytes() == b.buf
-                    } else {
-                        eq_ignore_ascii_case(a.as_bytes(), b.buf)
-                    }
-                }
+                Repr::Custom(ref b) => eq_ignore_ascii_case(a.as_bytes(), b.buf),
                 _ => false,
             },
         }
     }
 }
 
-// ===== Custom =====
-
-impl Hash for Custom {
+impl<'a> PartialEq<HeaderName> for HdrName<'a> {
     #[inline]
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        hasher.write(self.0.as_bytes())
+    fn eq(&self, other: &HeaderName) -> bool {
+        *other == *self
     }
 }
 
-// ===== MaybeLower =====
+// ===== Custom =====
 
-impl<'a> Hash for MaybeLower<'a> {
+// ===== MaybeValidated =====
+
+impl<'a> PartialEq for MaybeValidated<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        eq_ignore_ascii_case(self.buf, other.buf)
+    }
+}
+
+impl<'a> Eq for MaybeValidated<'a> {}
+
+impl<'a> Hash for MaybeValidated<'a> {
     #[inline]
     fn hash<H: Hasher>(&self, hasher: &mut H) {
-        if self.lower {
-            hasher.write(self.buf);
-        } else {
-            for &b in self.buf {
-                hasher.write(&[HEADER_CHARS[b as usize]]);
-            }
+        // Always hash with lowercase to match ByteStr::hash behavior
+        for &b in self.buf {
+            hasher.write_u8(b.to_ascii_lowercase());
         }
     }
 }
 
 // Assumes that the left hand side is already lower case
 #[inline]
-fn eq_ignore_ascii_case(lower: &[u8], s: &[u8]) -> bool {
-    if lower.len() != s.len() {
+fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
         return false;
     }
 
-    lower
-        .iter()
-        .zip(s)
-        .all(|(a, b)| *a == HEADER_CHARS[*b as usize])
+    a.iter()
+        .zip(b)
+        .all(|(a, b)| HEADER_CHARS_LOWER[*a as usize] == HEADER_CHARS_LOWER[*b as usize])
 }
 
 // Utility functions for MaybeUninit<>. These are drawn from unstable API's on
@@ -1709,9 +1816,9 @@ mod tests {
         assert_eq!(name.inner, Repr::Standard(Vary));
 
         let name = HeaderName::from(HdrName {
-            inner: Repr::Custom(MaybeLower {
+            inner: Repr::Custom(MaybeValidated {
                 buf: b"hello-world",
-                lower: true,
+                validated: true,
             }),
         });
 
@@ -1721,15 +1828,15 @@ mod tests {
         );
 
         let name = HeaderName::from(HdrName {
-            inner: Repr::Custom(MaybeLower {
+            inner: Repr::Custom(MaybeValidated {
                 buf: b"Hello-World",
-                lower: false,
+                validated: false,
             }),
         });
 
         assert_eq!(
             name.inner,
-            Repr::Custom(Custom(ByteStr::from_static("hello-world")))
+            Repr::Custom(Custom(ByteStr::from_static("Hello-World")))
         );
     }
 
@@ -1752,27 +1859,27 @@ mod tests {
         assert_ne!(a, b);
 
         let b = HdrName {
-            inner: Repr::Custom(MaybeLower {
+            inner: Repr::Custom(MaybeValidated {
                 buf: b"vaary",
-                lower: true,
+                validated: true,
             }),
         };
 
         assert_eq!(a, b);
 
         let b = HdrName {
-            inner: Repr::Custom(MaybeLower {
+            inner: Repr::Custom(MaybeValidated {
                 buf: b"vaary",
-                lower: false,
+                validated: false,
             }),
         };
 
         assert_eq!(a, b);
 
         let b = HdrName {
-            inner: Repr::Custom(MaybeLower {
+            inner: Repr::Custom(MaybeValidated {
                 buf: b"VAARY",
-                lower: false,
+                validated: false,
             }),
         };
 
@@ -1798,9 +1905,46 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    fn test_hash_match() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash<T: Hash + ?Sized>(t: &T) -> u64 {
+            let mut s = DefaultHasher::new();
+            t.hash(&mut s);
+            s.finish()
+        }
+
+        // Test custom header: lowercase
+        let s1 = HeaderName::from_static("hello");
+        let hash1 = hash(&s1);
+        let hash2 = HdrName::from_bytes(b"hello", |h| hash(&h)).unwrap();
+        assert_eq!(hash1, hash2, "Hash mismatch for 'hello'");
+
+        // Test standard header: use lowercase (standard headers don't preserve case)
+        let s3 = HeaderName::from_static("content-length");
+        let hash3 = hash(&s3);
+        let hash4 = HdrName::from_bytes(b"content-length", |h| hash(&h)).unwrap();
+        assert_eq!(hash3, hash4, "Hash mismatch for 'content-length'");
+
+        // Test custom mixed-case header: case is preserved
+        let s5 = HeaderName::from_static("X-Custom-Foo");
+        let hash5 = hash(&s5);
+        let hash6 = HdrName::from_bytes(b"X-Custom-Foo", |h| hash(&h)).unwrap();
+        assert_eq!(hash5, hash6, "Hash mismatch for 'X-Custom-Foo'");
+
+        // Test that custom header hashes are case-insensitive for lookup
+        let hash7 = HdrName::from_bytes(b"x-custom-foo", |h| hash(&h)).unwrap();
+        assert_eq!(
+            hash5, hash7,
+            "Hash mismatch for 'X-Custom-Foo' vs 'x-custom-foo'"
+        );
+    }
+
+    #[test]
     fn test_from_static_std_uppercase() {
-        HeaderName::from_static("Vary");
+        let v = HeaderName::from_static("Vary");
+        assert_eq!(v, "vary");
     }
 
     #[test]
@@ -1809,7 +1953,7 @@ mod tests {
         HeaderName::from_static("vary{}");
     }
 
-    // MaybeLower { lower: true }
+    // MaybeValidated { validated: true }
     #[test]
     fn test_from_static_custom_short() {
         let a = HeaderName {
@@ -1820,18 +1964,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_from_static_custom_short_uppercase() {
-        HeaderName::from_static("custom header");
+        HeaderName::from_static("Custom-Header");
     }
 
     #[test]
-    #[should_panic]
     fn test_from_static_custom_short_symbol() {
         HeaderName::from_static("CustomHeader");
     }
 
-    // MaybeLower { lower: false }
+    // MaybeValidated { validated: false }
     #[test]
     fn test_from_static_custom_long() {
         let a = HeaderName {
@@ -1846,7 +1988,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_from_static_custom_long_uppercase() {
         HeaderName::from_static(
             "Longer-Than-63--ThisHeaderIsLongerThanSixtyThreeCharactersAndThusHandledDifferent",
@@ -1887,7 +2028,7 @@ mod tests {
         HeaderName::from_lowercase(&[b'A'; 10]).unwrap_err();
         HeaderName::from_lowercase(&[0x1; 10]).unwrap_err();
         HeaderName::from_lowercase(&[0xFF; 10]).unwrap_err();
-        //HeaderName::from_lowercase(&[0; 100]).unwrap_err();
+        HeaderName::from_lowercase(&[0; 100]).unwrap_err();
         HeaderName::from_lowercase(&[b'A'; 100]).unwrap_err();
         HeaderName::from_lowercase(&[0x1; 100]).unwrap_err();
         HeaderName::from_lowercase(&[0xFF; 100]).unwrap_err();

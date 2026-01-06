@@ -1,80 +1,136 @@
-# HTTP
+# HTTP (Case-Preserving Fork)
 
-A general purpose library of common HTTP types
+A fork of the [hyperium/http](https://github.com/hyperium/http) crate that **preserves the original casing of CUSTOM HTTP header names**.
 
-[![CI](https://github.com/hyperium/http/workflows/CI/badge.svg)](https://github.com/hyperium/http/actions?query=workflow%3ACI)
-[![Crates.io](https://img.shields.io/crates/v/http.svg)](https://crates.io/crates/http)
-[![Documentation](https://docs.rs/http/badge.svg)][dox]
+## Why This Fork?
 
-More information about this crate can be found in the [crate
-documentation][dox].
+Some legacy servers require HTTP headers with specific casing (e.g., `X-Custom-Header` instead of `x-custom-header`). The standard `http` crate normalizes all header names to lowercase, which breaks compatibility with such servers.
 
-[dox]: https://docs.rs/http
+This fork modifies the `http` crate to:
+- **Preserve original casing** for custom headers (e.g., `X-Custom-Header` stays as-is)
+- **Maintain case-insensitive comparison** for Hash/Eq (required for correct `HeaderMap` behavior)
+- **Stay compatible** with `reqwest`, `hyper`, `h2`, and the broader Rust HTTP ecosystem
+
+## Behavior
+
+| Header Type | as_str() Output | Notes |
+|-------------|-----------------|-------|
+| Custom headers | Original casing preserved | `X-Custom-Header` → `"X-Custom-Header"` |
+| Standard headers | Lowercase | `Content-Type` → `"content-type"` |
+
+### Why Standard Headers Are Lowercase
+
+Standard headers (Content-Type, Accept, etc.) are normalized to lowercase to maintain compatibility with the `h2` crate, which uses `HeaderName` constants in `match` patterns. This requires `StructuralPartialEq`, which is only possible with derived (not manual) `PartialEq`.
+
+For most use cases, this is acceptable because:
+1. RFC 7230 requires HTTP headers to be case-insensitive
+2. Custom headers (`X-*` or non-standard names) are typically where case sensitivity matters for legacy systems
 
 ## Usage
 
-To use `http`, first add this to your `Cargo.toml`:
+### Using with Cargo Patch
+
+To use this fork with crates like `reqwest` that depend on `http`:
 
 ```toml
 [dependencies]
-http = "1.0"
+reqwest = "0.12"
+
+[patch.crates-io]
+http = { git = "https://github.com/sunadase/http.git" }
+# Or use a local path:
+# http = { path = "/path/to/this/http" }
 ```
 
-Next, add this to your crate:
+### Example
 
 ```rust
-use http::{Request, Response};
+use http::header::{HeaderMap, HeaderName, HeaderValue};
+use std::str::FromStr;
 
 fn main() {
-    // ...
+    // Custom headers preserve case
+    let custom = HeaderName::from_str("X-Custom-Header").unwrap();
+    assert_eq!(custom.as_str(), "X-Custom-Header"); // Case preserved!
+
+    // Standard headers are normalized to lowercase
+    let standard = HeaderName::from_str("Content-Type").unwrap();
+    assert_eq!(standard.as_str(), "content-type");
+
+    // Case-insensitive equality still works
+    let h1 = HeaderName::from_str("X-Custom-Header").unwrap();
+    let h2 = HeaderName::from_str("x-custom-header").unwrap();
+    assert_eq!(h1, h2); // Equal despite different casing
+
+    // HeaderMap lookups are case-insensitive
+    let mut map = HeaderMap::new();
+    map.insert(h1, HeaderValue::from_static("value"));
+    assert!(map.get("x-custom-header").is_some()); // Found!
 }
 ```
 
-## Examples
+## Verification
 
-Create an HTTP request:
+The `verification/` directory contains a working example project that demonstrates:
+1. How to use `[patch.crates-io]` to substitute this fork
+2. A Python server + Rust client test confirming case preservation works end-to-end
 
-```rust
-use http::Request;
+To run the verification:
 
-fn main() {
-    let request = Request::builder()
-      .uri("https://www.rust-lang.org/")
-      .header("User-Agent", "awesome/1.0")
-      .body(())
-      .unwrap();
-}
+```bash
+cd verification
+python3 server.py &
+cargo run
+# Should output: VERIFICATION SUCCESS: X-Custom-Header found
 ```
 
-Create an HTTP response:
+## Testing
 
-```rust
-use http::{Response, StatusCode};
+```bash
+# Run all tests
+cargo test
 
-fn main() {
-    let response = Response::builder()
-      .status(StatusCode::MOVED_PERMANENTLY)
-      .header("Location", "https://www.rust-lang.org/install.html")
-      .body(())
-      .unwrap();
-}
+# Run case preservation specific tests
+cargo test --test case_preservation
+cargo test --test e2e_verification
 ```
 
-# Supported Rust Versions
+## Technical Details
 
-This project follows the [hyper's MSRV _policy_][msrv], though it can be lower, and is currently set to `1.57`.
+### Changes from Upstream
 
-[msrv]: https://hyper.rs/contrib/msrv/
+1. **`Repr` enum simplified** - Removed `StandardPreserved` variant, using only `Standard` and `Custom`
 
-# License
+2. **`Custom` wrapper uses `ByteStr`** - Stores original bytes, implements case-insensitive `Hash` and `PartialEq`
 
-Licensed under either of
+3. **`from_static` updated** - Case-insensitive matching for standard headers in const context
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or https://apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or https://opensource.org/licenses/MIT)
+4. **`parse_hdr` updated** - Creates lowercase buffer for standard header matching while preserving original input for custom headers
 
-# Contribution
+5. **Internal Renaming** - Renamed `MaybeLower` to `MaybeValidated` to accurately reflect that custom headers are validated for safety but not necessarily lowercased
 
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual licensed as above, without any additional terms or conditions.
+6. **Validation Tables** - Introduced separate `HEADER_CHARS` (case-preserving) and `HEADER_CHARS_LOWER` (normalizing) tables for flexible parsing
+
+### Key Files Modified
+
+- `src/header/name.rs` - Header name parsing and storage
+- `src/byte_str.rs` - Case-insensitive hashing for ByteStr
+
+## Limitations
+
+1. **Standard headers don't preserve case** - `Content-Type` always becomes `content-type`
+2. **HTTP/2 and HTTP/3 compliance** - These protocols require lowercase headers anyway, so case preservation only matters for HTTP/1.1
+3. **This is a fork** - You'll need to maintain updates from upstream
+
+## License
+
+Licensed under either of:
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+## Credits
+
+Based on [hyperium/http](https://github.com/hyperium/http) by:
+- Alex Crichton
+- Carl Lerche  
+- Sean McArthur

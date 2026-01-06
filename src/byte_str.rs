@@ -2,7 +2,7 @@ use bytes::Bytes;
 
 use std::{ops, str};
 
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone, Ord, PartialOrd)]
 pub(crate) struct ByteStr {
     // Invariant: bytes contains valid UTF-8
     bytes: Bytes,
@@ -50,6 +50,27 @@ impl ByteStr {
         str::from_utf8(&bytes)?;
         // Invariant: just checked is utf8
         Ok(ByteStr { bytes })
+    }
+}
+
+impl PartialEq for ByteStr {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes.len() == other.bytes.len()
+            && self
+                .bytes
+                .iter()
+                .zip(other.bytes.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    }
+}
+
+impl Eq for ByteStr {}
+
+impl std::hash::Hash for ByteStr {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        for b in &self.bytes {
+            state.write_u8(b.to_ascii_lowercase());
+        }
     }
 }
 
